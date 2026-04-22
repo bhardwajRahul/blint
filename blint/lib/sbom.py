@@ -9,10 +9,9 @@ from typing import Any, Dict
 
 import orjson
 from custom_json_diff.lib.utils import file_read, file_write
+from packageurl import PackageURL
 from rich.progress import Progress
 
-from blint.lib.android import collect_app_metadata
-from blint.lib.binary import parse
 from blint.config import SYMBOL_DELIMITER, BlintOptions
 from blint.cyclonedx.spec import (
     BomFormat,
@@ -29,16 +28,16 @@ from blint.cyclonedx.spec import (
     Tools,
     Type,
 )
-from blint.logger import LOG
+from blint.db import detect_binaries_utilized
+from blint.lib.android import collect_app_metadata
+from blint.lib.binary import is_wasm_file, parse
 from blint.lib.utils import (
     camel_to_snake,
     create_component_evidence,
     find_bom_files,
     get_version,
 )
-from blint.db import detect_binaries_utilized
-
-from packageurl import PackageURL
+from blint.logger import LOG
 
 
 def default_parent(src_dirs: list[str], symbols_purl_map: dict = None) -> Component:
@@ -141,9 +140,15 @@ def generate(blint_options: BlintOptions, exe_files, android_files) -> CycloneDX
                 total=len(exe_files),
                 start=True,
             )
+        skipped_wasm = 0
         for exe in exe_files:
+            if is_wasm_file(exe):
+                skipped_wasm += 1
+                continue
             progress.update(
-                task, description=f"Processing [bold]{os.path.basename(exe)}[/bold]", advance=1
+                task,
+                description=f"Processing [bold]{os.path.basename(exe)}[/bold]",
+                advance=1,
             )
             components += process_exe_file(
                 dependencies_dict,
@@ -154,6 +159,8 @@ def generate(blint_options: BlintOptions, exe_files, android_files) -> CycloneDX
                 symbols_purl_map,
                 blint_options.use_blintdb,
             )
+        if skipped_wasm:
+            LOG.info(f"Skipped {skipped_wasm} wasm file(s) during SBOM generation")
         if android_files:
             task = progress.add_task(
                 f"[green] Parsing {len(android_files)} android apps",
@@ -203,7 +210,7 @@ def create_sbom(
     Returns:
         CycloneDX: CycloneDX object with trimmed components and dependencies
     """
-    
+
     # Populate the components
     sbom.components = trim_components(components)
     # If we have only one parent component then promote it to metadata.component
@@ -227,12 +234,20 @@ def create_sbom(
         f"SBOM includes {len(sbom.components)} components and {len(sbom.dependencies)} dependencies"
     )
     if output_file is sys.stdout:
-        print(sbom.model_dump_json(indent=2, exclude_none=True, exclude_defaults=True, warnings=False, by_alias=True))
+        print(
+            sbom.model_dump_json(
+                indent=2,
+                exclude_none=True,
+                exclude_defaults=True,
+                warnings=False,
+                by_alias=True,
+            )
+        )
     else:
         output_dir = os.path.dirname(output_file)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
-    
+
         file_write(
             os.path.join(output_dir, output_file),
             sbom.model_dump_json(
@@ -329,6 +344,8 @@ def process_exe_file(
         list[Component]: The updated list of components.
 
     """
+    if is_wasm_file(exe):
+        return []
     metadata: Dict[str, Any] = parse(exe)
     parent_component: Component = default_parent([exe], symbols_purl_map)
     parent_component.properties = []
