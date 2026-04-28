@@ -34,6 +34,27 @@ from blint.lib.utils import (
 from blint.logger import LOG
 
 
+def _coerce_rule_bool(value) -> bool:
+    """Parse review-rule booleans defensively from YAML-like values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "yes", "1", "on"):
+            return True
+        if normalized in ("false", "no", "0", "off", ""):
+            return False
+    return bool(value)
+
+
+def _coerce_min_patterns(value) -> int:
+    """Parse the minimum distinct pattern count safely, defaulting to 1."""
+    try:
+        return max(int(value), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def run_sbom_mode(blint_options: BlintOptions) -> CycloneDX:
     """
     Generates an SBOM for the given source directories. Binary files including android apk files are collected
@@ -660,25 +681,48 @@ class ReviewRunner:
             return
         for review_methods in review_list:
             for cid, rule_obj in review_methods.items():
-                if found_cid[cid] > EVIDENCE_LIMIT:
+                if found_cid[cid] >= EVIDENCE_LIMIT:
                     continue
                 patterns = rule_obj.get("patterns")
+                min_patterns = _coerce_min_patterns(rule_obj.get("min_patterns", 1))
+                allow_shared_matches = _coerce_rule_bool(
+                    rule_obj.get("allow_shared_matches")
+                )
+                rule_results = []
+                rule_matched_patterns = set()
+                rule_matched_functions = {}
                 for apattern in patterns:
                     if (
-                        found_pattern[apattern] > EVIDENCE_LIMIT
-                        or found_cid[cid] > EVIDENCE_LIMIT
+                        found_pattern[apattern] >= EVIDENCE_LIMIT
+                        or found_cid[cid] >= EVIDENCE_LIMIT
                     ):
                         continue
                     for afun in functions_list:
-                        if apattern.lower() in afun.lower() and not found_function.get(
-                            afun.lower()
+                        afun_lower = afun.lower()
+                        if (
+                            apattern.lower() in afun_lower
+                            and (
+                                allow_shared_matches
+                                or not found_function.get(afun_lower)
+                            )
+                            and not rule_matched_functions.get(afun_lower)
                         ):
-                            result = {
-                                "pattern": apattern,
-                                "function": afun,
-                            }
-                            results[cid].append(result)
-                            found_cid[cid] += 1
-                            found_pattern[apattern] += 1
-                            found_function[afun.lower()] = True
+                            rule_results.append(
+                                {
+                                    "pattern": apattern,
+                                    "function": afun,
+                                }
+                            )
+                            rule_matched_patterns.add(apattern)
+                            rule_matched_functions[afun_lower] = True
+                            break
+                if len(rule_matched_patterns) < min_patterns:
+                    continue
+                remaining = max(EVIDENCE_LIMIT - found_cid[cid], 0)
+                for result in rule_results[:remaining]:
+                    results[cid].append(result)
+                    found_cid[cid] += 1
+                    found_pattern[result["pattern"]] += 1
+                    if not allow_shared_matches:
+                        found_function[result["function"].lower()] = True
         self.results |= results
