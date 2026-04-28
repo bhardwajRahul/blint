@@ -257,6 +257,33 @@ def test_run_review_methods_symbols_parses_rule_options_defensively():
     assert "RULE_TYPO_SECOND" not in reviewer.results
 
 
+def test_run_review_methods_symbols_uses_informative_strings_per_rule_opt_in():
+    functions_list = ["safe_function"]
+    informative_values = ["bpf_sock_ops_active_established_cb"]
+
+    reviewer = ReviewRunner()
+    reviewer.run_review_methods_symbols(
+        [
+            {
+                "RULE_NO_OPT_IN": {
+                    "patterns": ["bpf_sock_ops_active_established_cb"],
+                }
+            },
+            {
+                "RULE_WITH_OPT_IN": {
+                    "patterns": ["bpf_sock_ops_active_established_cb"],
+                    "include_informative_strings": True,
+                }
+            },
+        ],
+        functions_list,
+        informative_values=informative_values,
+    )
+
+    assert "RULE_NO_OPT_IN" not in reviewer.results
+    assert "RULE_WITH_OPT_IN" in reviewer.results
+
+
 def test_safe_mermaid_label_sanitizes_parser_unsafe_chars():
     raw_label = ' unsafe extern "C" fn(*mut u8)\n\t\\windows\\path|core::fmt `tick` '
     normalized = _safe_mermaid_label(raw_label)
@@ -323,3 +350,51 @@ def test_filter_callgraph_by_min_confidence_filters_edges_and_externals():
     assert len(filtered["edges"]) == 1
     assert filtered["edges"][0]["confidence"] == "high"
     assert filtered["external"] == []
+
+
+def test_network_evasion_cluster_reviews_trigger_with_informative_strings():
+    metadata = {
+        "exe_type": "genericbinary",
+        "functions": [],
+        "symtab_symbols": [],
+        "informative_strings": [
+            {"value": "BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB"},
+            {"value": "bpf_setsockopt"},
+            {"value": "TCP_MAXSEG"},
+            {"value": "/dev/net/tun"},
+            {"value": "gvisor"},
+            {"value": "wintun"},
+            {"value": "IP_HDRINCL"},
+            {"value": "SOCK_RAW"},
+            {"value": "pcap_sendpacket"},
+            {"value": "DNS-over-HTTPS"},
+            {"value": "dns-query"},
+            {"value": "127.0.0.1:53"},
+        ],
+    }
+
+    reviewer = ReviewRunner()
+    reviewer.run_review(metadata)
+    results = reviewer.process_review("synthetic-net.bin", "synthetic-net.bin")
+    rule_ids = {result["id"] for result in results}
+
+    assert "EBPF_SOCK_OPS_CLUSTER" in rule_ids
+    assert "TUN_INTERFACE_CLUSTER" in rule_ids
+    assert "RAW_PACKET_SOCKET_CLUSTER" in rule_ids
+    assert "DOH_BYPASS_CLUSTER" in rule_ids
+
+
+def test_network_evasion_cluster_reviews_require_multiple_patterns():
+    metadata = {
+        "exe_type": "genericbinary",
+        "functions": [],
+        "symtab_symbols": [],
+        "informative_strings": [{"value": "IP_HDRINCL"}],
+    }
+
+    reviewer = ReviewRunner()
+    reviewer.run_review(metadata)
+    results = reviewer.process_review("single-token.bin", "single-token.bin")
+    rule_ids = {result["id"] for result in results}
+
+    assert "RAW_PACKET_SOCKET_CLUSTER" not in rule_ids

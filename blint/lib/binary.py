@@ -21,6 +21,7 @@ from blint.config import (
     get_int_from_env,
 )
 from blint.lib.disassembler import disassemble_functions
+from blint.lib.indicators import INFORMATIVE_STRING_HINTS
 from blint.lib.utils import (
     calculate_entropy,
     calculate_hashes,
@@ -35,6 +36,7 @@ from blint.logger import DEBUG, LOG
 
 MIN_ENTROPY = get_float_from_env("SECRET_MIN_ENTROPY", 0.39)
 MIN_LENGTH = get_int_from_env("SECRET_MIN_LENGTH", 80)
+
 
 # Enable lief logging in debug mode
 if LOG.level != DEBUG:
@@ -471,6 +473,53 @@ def parse_strings(parsed_obj):
             except (AttributeError, TypeError):
                 continue
     return strings_list
+
+
+def _prepare_informative_string_matchers(indicators):
+    """Normalize informative string indicators into reusable matcher groups."""
+    boundary_patterns = []
+    substring_indicators = []
+    for indicator in indicators:
+        lowered_indicator = indicator.lower().strip()
+        if not lowered_indicator:
+            continue
+        if all(ch.isalnum() or ch == "_" for ch in lowered_indicator):
+            boundary_patterns.append(
+                re.compile(rf"(?<![a-z0-9]){re.escape(lowered_indicator)}(?![a-z0-9])")
+            )
+            continue
+        substring_indicators.append(lowered_indicator)
+    return tuple(boundary_patterns), tuple(substring_indicators)
+
+
+def parse_informative_strings(parsed_obj):
+    """Extracts stable, non-secret string hints useful for capability clustering."""
+
+    boundary_patterns, substring_indicators = _prepare_informative_string_matchers(
+        INFORMATIVE_STRING_HINTS
+    )
+
+    informative = []
+    seen = set()
+    with contextlib.suppress(AttributeError):
+        strings = parsed_obj.strings
+        if isinstance(strings, lief.lief_errors):
+            return informative
+        for value in strings:
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            if any(indicator in lowered for indicator in substring_indicators) or any(
+                pattern.search(lowered) for pattern in boundary_patterns
+            ):
+                seen.add(lowered)
+                informative.append({"value": text, "category": "network_evasion_hint"})
+    return informative
 
 
 def parse_symbols(symbols):
@@ -1832,6 +1881,8 @@ def parse(exe_file, disassemble=False):  # pylint: disable=too-many-locals,too-m
         elif isinstance(parsed_obj, lief.MachO.Binary):
             metadata = add_mach0_metadata(exe_file, metadata, parsed_obj)
         metadata = standardize_keys(metadata)
+        if informative_strings := parse_informative_strings(parsed_obj):
+            metadata["informative_strings"] = informative_strings
         metadata["import_dependencies"] = analyze_import_deps(metadata)
         metadata["llvm_target_tuple"] = construct_llvm_target_tuple(metadata)
         metadata = add_derived_attributes(metadata, parsed_obj)

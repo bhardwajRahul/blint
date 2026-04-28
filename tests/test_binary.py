@@ -8,6 +8,7 @@ from blint.lib.binary import (
     build_disassembly_callgraph_metadata,
     demangle_symbolic_name,
     parse,
+    parse_informative_strings,
     parse_macho_symbols,
 )
 
@@ -60,6 +61,48 @@ def test_parse_wasm_parser_failure(tmp_path):
     assert metadata["binary_type"] == "WASM"
     assert metadata["errors"]
     assert "WebAssembly" in metadata["errors"][0]
+
+
+def test_parse_informative_strings_extracts_and_deduplicates_network_hints():
+    class _FakeParsed:
+        strings = [
+            "BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB",
+            "bpf_sock_ops_active_established_cb",
+            "IP_HDRINCL",
+            "harmless_string",
+            "127.0.0.1:53",
+            "shadow",
+            "sniper",
+        ]
+
+    informative = parse_informative_strings(_FakeParsed())
+    values = [entry["value"] for entry in informative]
+
+    assert "BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB" in values
+    assert "IP_HDRINCL" in values
+    assert "127.0.0.1:53" in values
+    assert "harmless_string" not in values
+    assert "shadow" not in values
+    assert "sniper" not in values
+    assert len(values) == 3
+
+
+def test_parse_informative_strings_matches_punctuated_indicators_once():
+    class _FakeParsed:
+        strings = [
+            " DNS-over-HTTPS ",
+            "dns-over-https",
+            "/dev/net/tun0",
+            "dns-query endpoint",
+            "",
+            None,
+        ]
+
+    informative = parse_informative_strings(_FakeParsed())
+    values = [entry["value"] for entry in informative]
+
+    assert values == ["DNS-over-HTTPS", "/dev/net/tun0", "dns-query endpoint"]
+    assert all(entry["category"] == "network_evasion_hint" for entry in informative)
 
 
 def test_parse_wasm_detects_dos_growth_loop_finding():
